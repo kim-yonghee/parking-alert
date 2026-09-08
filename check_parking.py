@@ -28,18 +28,18 @@ def should_run():
     is_weekday = weekday < 5
     
     if is_weekday:
-        # 평일 아침 07~09시: 30분 간격 (0, 30분)
+        # 평일 아침 07~09시: 30분 간격 (0~4분, 30~34분 허용)
         if 7 <= hour < 9:
-            if minute % 30 == 0:
+            if minute % 30 < 5:
                 return True, "morning"
         # 평일 저녁 18:30~23시: 10분 간격
         elif (hour == 18 and minute >= 30) or (19 <= hour < 23):
-            if minute % 10 == 0:
+            if minute % 10 < 5:
                 return True, "evening"
     else:
-        # 주말 09:30~18시: 15분 간격 (0, 15, 30, 45분)
+        # 주말 09:30~18시: 15분 간격
         if (hour == 9 and minute >= 30) or (10 <= hour < 18):
-            if minute % 15 == 0:
+            if minute % 15 < 5:
                 return True, "weekend"
     
     return False, None
