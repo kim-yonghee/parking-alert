@@ -1,0 +1,36 @@
+name: Parking Check Alert
+
+on:
+  schedule:
+    - cron: '*/5 21-23,0-14 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Run parking check
+        env:
+          CAR_NUMBER: ${{ secrets.CAR_NUMBER }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_parking.py
+      
+      - name: Save state
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add last_state.txt || true
+          git diff --staged --quiet || git commit -m "Update parking state"
+          git push || true
