@@ -22,20 +22,25 @@ def should_run():
     """현재 시간이 조회 시간대인지 확인"""
     now = get_kst_now()
     hour = now.hour
+    minute = now.minute
     weekday = now.weekday()  # 0=월요일, 6=일요일
     
     is_weekday = weekday < 5
     
     if is_weekday:
-        # 평일: 아침 7~9시, 저녁 18~23시
+        # 평일 아침 07~09시: 30분 간격 (0, 30분)
         if 7 <= hour < 9:
-            return True, "morning"
-        elif 18 <= hour < 23:
-            return True, "evening"
+            if minute % 30 == 0:
+                return True, "morning"
+        # 평일 저녁 18:30~23시: 10분 간격
+        elif (hour == 18 and minute >= 30) or (19 <= hour < 23):
+            if minute % 10 == 0:
+                return True, "evening"
     else:
-        # 주말: 9~23시
-        if 9 <= hour < 23:
-            return True, "weekend"
+        # 주말 09:30~18시: 15분 간격 (0, 15, 30, 45분)
+        if (hour == 9 and minute >= 30) or (10 <= hour < 18):
+            if minute % 15 == 0:
+                return True, "weekend"
     
     return False, None
 
@@ -123,15 +128,13 @@ def send_telegram(message):
 def main():
     now = get_kst_now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    weekday = now.weekday()
-    is_weekday = weekday < 5
     
     print(f"[{now_str}] 실행 시작")
     
     # 1. 조회 시간대 확인
     should, time_slot = should_run()
     if not should:
-        print("조회 시간대 아님, 종료")
+        print("조회 시간대 아님 또는 간격 아님, 종료")
         return
     
     print(f"시간대: {time_slot}")
