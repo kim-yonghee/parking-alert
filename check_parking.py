@@ -14,7 +14,7 @@ PARKING_NAME = "용산구청 부설주차장"
 CONFIRM_COUNT = 2
 
 STATE_FILE = "last_state.txt"       # IN / OUT / UNKNOWN
-EXIT_DONE_FILE = "exit_done.txt"    # 출차 완료한 날짜
+EXIT_DONE_FILE = "exit_done.txt"    # 출차/조회중단 완료한 날짜
 LAST_IN_FILE = "last_in.txt"        # 마지막으로 '주차 중' 확인한 시각
 PENDING_FILE = "pending_out.txt"    # 연속 OUT 카운트
 
@@ -44,9 +44,13 @@ def should_run(now=None):
     """조회 시간대 여부 판정 (Actions 지연 0~4분 허용)"""
     now = now or get_kst_now()
     hour, minute = now.hour, now.minute
-    is_weekday = now.weekday() < 5   # 0=월 ... 6=일
+    weekday = now.weekday()  # 0=월 ... 6=일
 
-    if is_weekday:
+    # 목요일(3)은 무조건 스킵
+    if weekday == 3:
+        return False, None
+
+    if weekday < 5:  # 월, 화, 수, 금
         # 평일 아침 07:00~08:59, 30분 간격
         if 7 <= hour < 9:
             if minute % 30 < 5:
@@ -59,10 +63,17 @@ def should_run(now=None):
             return False, None
         return False, None
 
-    # 주말 09:30~17:59, 15분 간격
+    # 주말(토, 일) 09:30~17:59, 15분 간격
     if (hour == 9 and minute >= 30) or (10 <= hour < 18):
         if minute % 15 < 5:
             return True, "weekend"
+        return False, None
+        
+    # 주말(토, 일) 저녁 18:30 추가 (18:30 미조회 확인을 위해)
+    if hour == 18 and 30 <= minute < 40:
+        if minute % 10 < 5:
+            return True, "weekend_evening"
+        
     return False, None
 
 
@@ -139,8 +150,8 @@ def main():
         return
     print(f"시간대: {slot}")
 
-    if slot in ("evening", "weekend") and is_exit_done_today():
-        print("오늘 이미 출차 완료, 종료")
+    if is_exit_done_today():
+        print("오늘 이미 출차(또는 조회 중단) 완료, 종료")
         return
 
     print(f"차량 {CAR_NUMBER} 조회 중...")
@@ -152,6 +163,22 @@ def main():
 
     last_state = read_file(STATE_FILE, "UNKNOWN")
     print(f"이전 상태: {last_state}")
+
+    # ---------- 18:30 첫 조회 미발견 시 중단 로직 ----------
+    # 목요일은 이미 should_run에서 걸러졌으므로 제외됨
+    if now.hour == 18 and 30 <= now.minute < 40:
+        if not found:
+            print("18:30 미조회 확인 → 금일 조회 중단")
+            send_telegram(
+                f"🚫 <b>차량 미조회 알림</b>\n\n"
+                f"차량번호: {CAR_NUMBER}\n"
+                f"18:30 기준 주차장에 차량이 없습니다.\n"
+                f"금일 조회를 중단합니다."
+            )
+            write_file(STATE_FILE, "OUT")
+            write_file(PENDING_FILE, "0")
+            write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d")) # 조회 중단 플래그
+            return
 
     # ---------- 주차 중 ----------
     if found:
@@ -174,9 +201,8 @@ def main():
         write_file(STATE_FILE, "IN")
         return
 
-    # ---------- 미발견 ----------
+    # ---------- 미발견 (출차 대기) ----------
     if last_state != "IN":
-        # UNKNOWN 또는 이미 OUT → 알림 없이 기록만
         print("주차 이력 없음 → 알림 없이 OUT 기록")
         write_file(STATE_FILE, "OUT")
         write_file(PENDING_FILE, "0")
@@ -201,7 +227,8 @@ def main():
 
     write_file(STATE_FILE, "OUT")
     write_file(PENDING_FILE, "0")
-    if slot in ("evening", "weekend"):
+    
+    if slot in ("evening", "weekend_evening", "weekend"):
         write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
         print("오늘 출차 완료 기록")
 
