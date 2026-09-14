@@ -4,10 +4,11 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 # ===== 설정 =====
-CAR_NUMBER = os.environ.get('CAR_NUMBER', '1989')
+# 빈 문자열이 넘어와도 기본값을 사용하도록 or 연산자 적용
+CAR_NUMBER = os.environ.get('CAR_NUMBER') or '1989'
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-API_URL = os.environ.get('API_URL', 'http://yongparking.co.kr/include/DST/inc_find_car.dst')
+API_URL = os.environ.get('API_URL') or 'http://yongparking.co.kr/include/DST/inc_find_car.dst'
 PARKING_NAME = "용산구청 부설주차장"
 
 CONFIRM_COUNT = 2
@@ -51,14 +52,15 @@ def check_parking():
             if "<" in result[:20].lower():
                 return None, "html_response"
             return False, ""
-        except Exception:
+        except Exception as e:
+            print(f"[API 조회 오류] {e}")
             time.sleep(3)
     return None, "request_failed"
 
 def send_telegram(message):
     print("▶️ 텔레그램 발송 시도 중...")
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ 오류: 텔레그램 토큰 또는 챗아이디(Secrets)가 누락되었습니다.")
+        print("❌ 오류: 텔레그램 토큰 또는 챗아이디가 누락되었습니다.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
@@ -78,7 +80,8 @@ def main():
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     weekday = now.weekday()
     
-    print(f"[{now_str}] 파이썬 스크립트 실행 시작 (요일: {weekday})")
+    print(f"[{now_str}] 파이썬 스크립 실행 시작 (요일: {weekday})")
+    print(f"사용 API URL: {API_URL}")
     
     # 1. 목요일은 무조건 조회 스킵
     if weekday == 3:
@@ -87,23 +90,24 @@ def main():
         
     # 2. 오늘 이미 알림을 보냈다면(출차/미조회 중단) 실행 안 함
     if is_exit_done_today():
-        print("오늘 이미 최종 알림(출차/미조회)이 완료되어 스킵합니다. (exit_done.txt 초기화 필요)")
+        print("오늘 이미 최종 알림이 완료되어 스킵합니다.")
         return
 
     print(f"주차장 API 조회 중 (차량번호: {CAR_NUMBER})...")
     found, info = check_parking()
+    
     if found is None:
         print("API 판정 불가로 종료합니다.")
         return
 
     print(f"조회 결과: {'주차 중' if found else '미발견'}")
     last_state = read_file(STATE_FILE, "UNKNOWN")
-    print(f"이전 기록(last_state.txt): {last_state}")
+    print(f"이전 기록: {last_state}")
 
     # 3. [18:30 ~ 18:59 사이 첫 조회] 차량이 없는 경우
     if now.hour == 18 and 30 <= now.minute <= 59:
         if not found:
-            print("18:30 기준 미조회 확인 -> 중단 알림 발송 로직 진입")
+            print("18:30 기준 미조회 확인 -> 중단 알림 발송")
             send_telegram(
                 f"🚫 <b>차량 미조회 알림</b>\n\n"
                 f"차량번호: {CAR_NUMBER}\n"
@@ -113,7 +117,6 @@ def main():
             write_file(STATE_FILE, "OUT")
             write_file(PENDING_FILE, "0")
             write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
-            print("상태 파일 업데이트 완료 및 스크립트 종료")
             return
 
     # 4. 주차 중 (IN)
@@ -122,7 +125,7 @@ def main():
         write_file(PENDING_FILE, "0")
         if last_state != "IN":
             if last_state != "UNKNOWN":
-                print("새로운 입차 확인 -> 입차 알림 발송 로직 진입")
+                print("새로운 입차 확인 -> 알림 발송")
                 send_telegram(
                     f"🚗 <b>입차 알림</b>\n\n"
                     f"차량번호: {info}\n"
@@ -130,9 +133,9 @@ def main():
                     f"주차장: {PARKING_NAME}"
                 )
             else:
-                print("첫 확인이므로 알림 없이 IN 기록만 남깁니다.")
+                print("첫 확인 -> 알림 없이 IN 기록")
         else:
-            print("상태 변경 없음 (계속 주차 중)")
+            print("상태 변경 없음 (주차 중)")
             
         write_file(STATE_FILE, "IN")
         return
@@ -153,7 +156,7 @@ def main():
         return
 
     # 완전 출차 확정
-    print("연속 미발견으로 출차 확정 -> 출차 알림 발송 로직 진입")
+    print("연속 미발견으로 출차 확정 -> 알림 발송")
     last_in = read_file(LAST_IN_FILE, "기록 없음")
     send_telegram(
         f"🚙 <b>출차 알림</b>\n\n"
@@ -166,7 +169,6 @@ def main():
     write_file(STATE_FILE, "OUT")
     write_file(PENDING_FILE, "0")
     
-    # 12시(정오) 이후에 출차했다면 더 이상 조회 안 하도록 처리
     if now.hour >= 12:
         write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
 
