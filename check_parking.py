@@ -4,7 +4,6 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 # ===== 설정 =====
-# 빈 문자열이 넘어와도 기본값을 사용하도록 or 연산자 적용
 CAR_NUMBER = os.environ.get('CAR_NUMBER') or '1989'
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
@@ -80,15 +79,14 @@ def main():
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     weekday = now.weekday()
     
-    print(f"[{now_str}] 파이썬 스크립 실행 시작 (요일: {weekday})")
-    print(f"사용 API URL: {API_URL}")
+    print(f"[{now_str}] 파이썬 스크립트 실행 시작 (요일: {weekday})")
     
     # 1. 목요일은 무조건 조회 스킵
     if weekday == 3:
         print("목요일이므로 조회를 스킵합니다.")
         return
         
-    # 2. 오늘 이미 알림을 보냈다면(출차/미조회 중단) 실행 안 함
+    # 2. 오늘 이미 최종 알림을 보냈다면 실행 안 함
     if is_exit_done_today():
         print("오늘 이미 최종 알림이 완료되어 스킵합니다.")
         return
@@ -104,14 +102,14 @@ def main():
     last_state = read_file(STATE_FILE, "UNKNOWN")
     print(f"이전 기록: {last_state}")
 
-    # 3. [18:30 ~ 18:59 사이 첫 조회] 차량이 없는 경우
-    if now.hour == 18 and 30 <= now.minute <= 59:
-        if not found:
-            print("18:30 기준 미조회 확인 -> 중단 알림 발송")
+    # 3. [18:30 이후 첫 조회] 차량이 없는 경우 (GitHub 지연 고려 & 출차 로직과 충돌 방지)
+    if (now.hour == 18 and now.minute >= 30) or (now.hour >= 19):
+        if not found and last_state != "IN":
+            print("18:30 이후 미조회 확인 -> 중단 알림 발송")
             send_telegram(
                 f"🚫 <b>차량 미조회 알림</b>\n\n"
                 f"차량번호: {CAR_NUMBER}\n"
-                f"18:30 기준 주차장에 차량이 없습니다.\n"
+                f"18:30 이후 주차장에 차량이 없습니다.\n"
                 f"금일 조회를 중단합니다."
             )
             write_file(STATE_FILE, "OUT")
