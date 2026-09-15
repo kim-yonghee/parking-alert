@@ -102,7 +102,7 @@ def main():
     last_state = read_file(STATE_FILE, "UNKNOWN")
     print(f"이전 기록: {last_state}")
 
-    # 3. [18:30 이후 첫 조회] 차량이 없는 경우 (GitHub 지연 고려 & 출차 로직과 충돌 방지)
+    # 3. [18:30 이후 첫 조회] 차량이 없는 경우
     if (now.hour == 18 and now.minute >= 30) or (now.hour >= 19):
         if not found and last_state != "IN":
             print("18:30 이후 미조회 확인 -> 중단 알림 발송")
@@ -122,16 +122,13 @@ def main():
         write_file(LAST_IN_FILE, now_str)
         write_file(PENDING_FILE, "0")
         if last_state != "IN":
-            if last_state != "UNKNOWN":
-                print("새로운 입차 확인 -> 알림 발송")
-                send_telegram(
-                    f"🚗 <b>입차 알림</b>\n\n"
-                    f"차량번호: {info}\n"
-                    f"확인시간: {now_str}\n"
-                    f"주차장: {PARKING_NAME}"
-                )
-            else:
-                print("첫 확인 -> 알림 없이 IN 기록")
+            print("새로운 입차 확인 -> 알림 발송")
+            send_telegram(
+                f"🚗 <b>입차 알림</b>\n\n"
+                f"차량번호: {info}\n"
+                f"확인시간: {now_str}\n"
+                f"주차장: {PARKING_NAME}"
+            )
         else:
             print("상태 변경 없음 (주차 중)")
             
