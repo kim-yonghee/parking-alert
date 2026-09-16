@@ -78,6 +78,8 @@ def main():
     now = get_kst_now()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     weekday = now.weekday()
+    hour = now.hour
+    minute = now.minute
     
     print(f"[{now_str}] 파이썬 스크립트 실행 시작 (요일: {weekday})")
     
@@ -86,7 +88,15 @@ def main():
         print("목요일이므로 조회를 스킵합니다.")
         return
         
-    # 2. 오늘 이미 최종 알림을 보냈다면 실행 안 함
+    # 2. 지정된 시간대(07:00~09:59 / 18:30~23:59)인지 확인
+    is_morning = (7 <= hour <= 9)
+    is_evening = (hour == 18 and minute >= 30) or (19 <= hour <= 23)
+    
+    if not (is_morning or is_evening):
+        print(f"현재 시간({now_str})은 지정된 조회 시간이 아니므로 스킵합니다.")
+        return
+
+    # 3. 오늘 이미 최종 알림을 보냈다면 실행 안 함
     if is_exit_done_today():
         print("오늘 이미 최종 알림이 완료되어 스킵합니다.")
         return
@@ -102,22 +112,21 @@ def main():
     last_state = read_file(STATE_FILE, "UNKNOWN")
     print(f"이전 기록: {last_state}")
 
-    # 3. [18:30 이후 첫 조회] 차량이 없는 경우
-    if (now.hour == 18 and now.minute >= 30) or (now.hour >= 19):
-        if not found and last_state != "IN":
-            print("18:30 이후 미조회 확인 -> 중단 알림 발송")
-            send_telegram(
-                f"🚫 <b>차량 미조회 알림</b>\n\n"
-                f"차량번호: {CAR_NUMBER}\n"
-                f"18:30 이후 주차장에 차량이 없습니다.\n"
-                f"금일 조회를 중단합니다."
-            )
-            write_file(STATE_FILE, "OUT")
-            write_file(PENDING_FILE, "0")
-            write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
-            return
+    # 4. [18:30 이후 첫 조회] 차량이 없는 경우 (입차 안 함)
+    if is_evening and not found and last_state != "IN":
+        print("18:30 이후 미조회 확인 -> 중단 알림 발송")
+        send_telegram(
+            f"🚫 <b>차량 미조회 알림</b>\n\n"
+            f"차량번호: {CAR_NUMBER}\n"
+            f"18:30 이후 주차장에 차량이 없습니다.\n"
+            f"금일 조회를 중단합니다."
+        )
+        write_file(STATE_FILE, "OUT")
+        write_file(PENDING_FILE, "0")
+        write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
+        return
 
-    # 4. 주차 중 (IN)
+    # 5. 주차 중 (IN)
     if found:
         write_file(LAST_IN_FILE, now_str)
         write_file(PENDING_FILE, "0")
@@ -135,7 +144,7 @@ def main():
         write_file(STATE_FILE, "IN")
         return
 
-    # 5. 차량 미발견 (OUT)
+    # 6. 차량 미발견 (OUT) 상태 처리
     if last_state != "IN":
         print("주차 이력 없음 -> OUT 기록 유지")
         write_file(STATE_FILE, "OUT")
