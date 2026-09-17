@@ -59,19 +59,12 @@ def check_parking():
 def send_telegram(message):
     print("▶️ 텔레그램 발송 시도 중...")
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ 오류: 텔레그램 토큰 또는 챗아이디가 누락되었습니다.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         res = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-        if res.ok:
-            print("✅ 텔레그램 발송 성공!")
-            return True
-        else:
-            print(f"❌ 텔레그램 발송 실패 (상태코드 {res.status_code}): {res.text}")
-            return False
-    except Exception as e:
-        print(f"❌ 텔레그램 네트워크 오류: {e}")
+        return res.ok
+    except Exception:
         return False
 
 def main():
@@ -81,11 +74,8 @@ def main():
     hour = now.hour
     minute = now.minute
     
-    print(f"[{now_str}] 파이썬 스크립트 실행 시작 (요일: {weekday})")
-    
     # 1. 목요일은 무조건 조회 스킵
     if weekday == 3:
-        print("목요일이므로 조회를 스킵합니다.")
         return
         
     # 2. 지정된 시간대(07:00~09:59 / 18:30~23:59)인지 확인
@@ -93,28 +83,20 @@ def main():
     is_evening = (hour == 18 and minute >= 30) or (19 <= hour <= 23)
     
     if not (is_morning or is_evening):
-        print(f"현재 시간({now_str})은 지정된 조회 시간이 아니므로 스킵합니다.")
         return
 
     # 3. 오늘 이미 최종 알림을 보냈다면 실행 안 함
     if is_exit_done_today():
-        print("오늘 이미 최종 알림이 완료되어 스킵합니다.")
         return
 
-    print(f"주차장 API 조회 중 (차량번호: {CAR_NUMBER})...")
     found, info = check_parking()
-    
     if found is None:
-        print("API 판정 불가로 종료합니다.")
         return
 
-    print(f"조회 결과: {'주차 중' if found else '미발견'}")
     last_state = read_file(STATE_FILE, "UNKNOWN")
-    print(f"이전 기록: {last_state}")
 
     # 4. [18:30 이후 첫 조회] 차량이 없는 경우 (입차 안 함)
     if is_evening and not found and last_state != "IN":
-        print("18:30 이후 미조회 확인 -> 중단 알림 발송")
         send_telegram(
             f"🚫 <b>차량 미조회 알림</b>\n\n"
             f"차량번호: {CAR_NUMBER}\n"
@@ -130,6 +112,7 @@ def main():
     if found:
         write_file(LAST_IN_FILE, now_str)
         write_file(PENDING_FILE, "0")
+        
         if last_state != "IN":
             print("새로운 입차 확인 -> 알림 발송")
             send_telegram(
@@ -140,27 +123,24 @@ def main():
             )
         else:
             print("상태 변경 없음 (주차 중)")
-            
+                
         write_file(STATE_FILE, "IN")
         return
 
     # 6. 차량 미발견 (OUT) 상태 처리
     if last_state != "IN":
-        print("주차 이력 없음 -> OUT 기록 유지")
         write_file(STATE_FILE, "OUT")
         write_file(PENDING_FILE, "0")
         return
 
-    # 주차 중이었다가 안 보임 (출차 대기)
+    # 7. 주차 중이었다가 안 보임 (출차 대기)
     pending = int(read_file(PENDING_FILE, "0") or 0) + 1
     write_file(PENDING_FILE, pending)
-    print(f"출차 의심: {pending}/{CONFIRM_COUNT}회")
 
     if pending < CONFIRM_COUNT:
         return
 
-    # 완전 출차 확정
-    print("연속 미발견으로 출차 확정 -> 알림 발송")
+    # 8. 완전 출차 확정
     last_in = read_file(LAST_IN_FILE, "기록 없음")
     send_telegram(
         f"🚙 <b>출차 알림</b>\n\n"
@@ -173,7 +153,8 @@ def main():
     write_file(STATE_FILE, "OUT")
     write_file(PENDING_FILE, "0")
     
-    if now.hour >= 12:
+    # 오후 12시 이후 출차 시 오늘은 완벽히 조회를 중단하도록 기록
+    if hour >= 12:
         write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
 
 if __name__ == "__main__":
