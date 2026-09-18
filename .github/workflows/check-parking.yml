@@ -15,21 +15,16 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install requests
-
       - name: Run parking check
         env:
           CAR_NUMBER: ${{ secrets.CAR_NUMBER }}
@@ -37,22 +32,27 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           API_URL: ${{ secrets.API_URL }}
         run: python check_parking.py
-
       - name: Save state
         if: always()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add -A last_state.txt exit_done.txt last_in.txt pending_out.txt 2>/dev/null || true
-          if git diff --staged --quiet; then
-            echo "변경 없음"
+          if [ ! -f parking_state.json ]; then
             exit 0
           fi
-          git commit -m "state: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git add -- parking_state.json
+          if git diff --staged --quiet; then
+            exit 0
+          fi
+          git commit -m "Update parking state"
           for i in 1 2 3; do
-            git pull --rebase --autostash origin main && git push origin main && exit 0
-            echo "push 재시도 $i"
+            if git pull --rebase origin main && git push origin main; then
+              exit 0
+            fi
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              git rebase --abort
+              exit 1
+            fi
             sleep 5
           done
-          echo "push 최종 실패"
           exit 1
