@@ -1,161 +1,153 @@
+import json
 import os
-import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import requests
-from datetime import datetime, timezone, timedelta
 
-# ===== 설정 =====
-CAR_NUMBER = os.environ.get('CAR_NUMBER') or '1989'
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-API_URL = os.environ.get('API_URL') or 'http://yongparking.co.kr/include/DST/inc_find_car.dst'
-PARKING_NAME = "용산구청 부설주차장"
-
+KST = timezone(timedelta(hours=9))
+STATE = Path('parking_state.json')
 CONFIRM_COUNT = 2
+MAX_GAP_SECONDS = 20 * 60
 
-STATE_FILE = "last_state.txt"
-EXIT_DONE_FILE = "exit_done.txt"
-LAST_IN_FILE = "last_in.txt"
-PENDING_FILE = "pending_out.txt"
 
-def get_kst_now():
-    return datetime.now(timezone(timedelta(hours=9)))
+def save(state):
+    temporary = STATE.with_suffix('.tmp')
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+    temporary.replace(STATE)
 
-def read_file(path, default=""):
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-    except Exception:
-        pass
-    return default
 
-def write_file(path, value):
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(str(value))
+def load(today):
+    if STATE.exists():
+        state = json.loads(STATE.read_text(encoding='utf-8'))
+        if state['date'] == today:
+            return state
+    return {'date': today, 'phase': 'WAIT_IN', 'pending': 0,
+            'pending_at': None, 'last_in': '', 'notifications': [],
+            'morning_checks': 0, 'morning_errors': 0}
 
-def is_exit_done_today():
-    return read_file(EXIT_DONE_FILE) == get_kst_now().strftime("%Y-%m-%d")
-
-def check_parking():
-    params = {"PROC_CMD": "FIND_00", "CAR_TYPE": "00", "CAR_NO": CAR_NUMBER}
-    for attempt in range(1, 4):
-        try:
-            res = requests.get(API_URL, params=params, timeout=10)
-            res.raise_for_status()
-            result = res.text.strip()
-            if result.startswith("OK"):
-                parts = result.split("|")
-                return True, (parts[1] if len(parts) > 1 else CAR_NUMBER)
-            if result.startswith(("NO", "FAIL", "ERR")) or result == "":
-                return False, ""
-            if "<" in result[:20].lower():
-                return None, "html_response"
-            return False, ""
-        except Exception as e:
-            print(f"[API 조회 오류] {e}")
-            time.sleep(3)
-    return None, "request_failed"
 
 def send_telegram(message):
-    print("▶️ 텔레그램 발송 시도 중...")
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat = os.environ.get('TELEGRAM_CHAT_ID')
+    if not token or not chat:
+        raise RuntimeError('텔레그램 Secrets 설정이 필요합니다.')
     try:
-        res = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-        return res.ok
-    except Exception:
+        response = requests.post(
+            f'https://api.telegram.org/bot{token}/sendMessage',
+            json={'chat_id': chat, 'text': message}, timeout=10)
+        if not response.ok or response.json().get('ok') is not True:
+            raise RuntimeError('텔레그램 발송 실패')
+    except (requests.RequestException, ValueError):
+        raise RuntimeError('텔레그램 연결 또는 응답 오류') from None
+
+
+def flush_notifications(state):
+    while state['notifications']:
+        send_telegram(state['notifications'][0])
+        state['notifications'].pop(0)
+        save(state)
+
+
+def check_parking():
+    car = os.environ.get('CAR_NUMBER')
+    api = os.environ.get('API_URL')
+    if not car or not api:
+        raise RuntimeError('CAR_NUMBER와 API_URL Secrets가 필요합니다.')
+    try:
+        response = requests.get(api, params={
+            'PROC_CMD': 'FIND_00', 'CAR_TYPE': '00', 'CAR_NO': car
+        }, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException:
+        print('주차 API 연결 실패: 이번 조회로 입출차를 판단하지 않습니다.')
+        return None
+    # 실제 API 규격을 확인해야 합니다. NO를 정상 미조회 코드로 가정합니다.
+    status = response.text.strip().split('|', 1)[0].strip()
+    if status == 'OK':
+        return True
+    if status == 'NO':
         return False
+    print('알 수 없는 주차 API 응답: 입출차 판단 보류')
+    return None
 
-def main():
-    now = get_kst_now()
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    weekday = now.weekday()
-    hour = now.hour
-    minute = now.minute
-    
-    # 1. 목요일은 무조건 조회 스킵
-    if weekday == 3:
+
+def main(now=None):
+    now = now or datetime.now(KST)
+    if now.weekday() == 3:
+        print('목요일: 조회하지 않습니다.')
         return
-        
-    # 2. 지정된 시간대(07:00~09:59 / 18:30~23:59)인지 확인
-    is_morning = (7 <= hour <= 9)
-    is_evening = (hour == 18 and minute >= 30) or (19 <= hour <= 23)
-    
-    if not (is_morning or is_evening):
+    state = load(now.strftime('%Y-%m-%d'))
+    # 발송 실패한 알림만 재시도하며, 이 과정에서 주차 API는 호출하지 않습니다.
+    flush_notifications(state)
+    if state['phase'] == 'DONE':
+        print('당일 조회 종료')
         return
 
-    # 3. 오늘 이미 최종 알림을 보냈다면 실행 안 함
-    if is_exit_done_today():
-        return
-
-    found, info = check_parking()
-    if found is None:
-        return
-
-    last_state = read_file(STATE_FILE, "UNKNOWN")
-
-    # 4. [18:30 이후 첫 조회] 차량이 없는 경우 (입차 안 함)
-    if is_evening and not found and last_state != "IN":
-        send_telegram(
-            f"🚫 <b>차량 미조회 알림</b>\n\n"
-            f"차량번호: {CAR_NUMBER}\n"
-            f"18:30 이후 주차장에 차량이 없습니다.\n"
-            f"금일 조회를 중단합니다."
-        )
-        write_file(STATE_FILE, "OUT")
-        write_file(PENDING_FILE, "0")
-        write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
-        return
-
-    # 5. 주차 중 (IN)
-    if found:
-        write_file(LAST_IN_FILE, now_str)
-        write_file(PENDING_FILE, "0")
-        
-        if last_state != "IN":
-            print("새로운 입차 확인 -> 알림 발송")
-            send_telegram(
-                f"🚗 <b>입차 알림</b>\n\n"
-                f"차량번호: {info}\n"
-                f"확인시간: {now_str}\n"
-                f"주차장: {PARKING_NAME}"
-            )
+    minutes = now.hour * 60 + now.minute
+    if state['phase'] == 'WAIT_IN':
+        if minutes >= 9 * 60:
+            state['phase'] = 'DONE'
+            checks = state.get('morning_checks', 0)
+            errors = state.get('morning_errors', 0)
+            if checks == 0:
+                detail = '오전 정상 조회 기록이 없어 입차 여부를 확인하지 못했습니다.'
+            else:
+                detail = '오전 07:00~09:00 동안 입차가 확인되지 않았습니다.'
+            if errors:
+                detail += f'\n조회 오류 {errors}회가 포함되어 있습니다.'
+            state['notifications'].append(
+                '🚫 차량 입차 미확인 알림\n'
+                f"차량번호: {os.environ.get('CAR_NUMBER', '')}\n"
+                f'{detail}\n오늘 조회를 종료합니다.')
+            save(state)
+            flush_notifications(state)
+            print('오전 입차 확인 없음: 당일 조회 종료')
+            return
+        if minutes < 7 * 60:
+            return
+        found = check_parking()
+        counter = 'morning_errors' if found is None else 'morning_checks'
+        state[counter] = state.get(counter, 0) + 1
+        if found is True:
+            state['phase'] = 'IN'
+            state['last_in'] = now.strftime('%Y-%m-%d %H:%M:%S')
+            state['notifications'].append(
+                f"🚗 입차 확인 알림\n차량번호: {os.environ.get('CAR_NUMBER', '')}"
+                f"\n확인시간: {state['last_in']}\n주차장: 용산구청 부설주차장"
+                '\n오후 6시 30분부터 출차를 확인합니다.')
+            save(state)
+            flush_notifications(state)
         else:
-            print("상태 변경 없음 (주차 중)")
-                
-        write_file(STATE_FILE, "IN")
+            save(state)
         return
 
-    # 6. 차량 미발견 (OUT) 상태 처리
-    if last_state != "IN":
-        write_file(STATE_FILE, "OUT")
-        write_file(PENDING_FILE, "0")
+    if minutes < 18 * 60 + 30:
+        print('오전 입차 확인 완료: 18:30까지 조회하지 않습니다.')
         return
 
-    # 7. 주차 중이었다가 안 보임 (출차 대기)
-    pending = int(read_file(PENDING_FILE, "0") or 0) + 1
-    write_file(PENDING_FILE, pending)
+    found = check_parking()
+    if found is True:
+        state.update(pending=0, pending_at=None,
+                     last_in=now.strftime('%Y-%m-%d %H:%M:%S'))
+    elif found is None:
+        state.update(pending=0, pending_at=None)
+    else:
+        previous = state['pending_at']
+        gap = now.timestamp() - previous if previous is not None else None
+        consecutive = gap is not None and 0 < gap <= MAX_GAP_SECONDS
+        state['pending'] = state['pending'] + 1 if consecutive else 1
+        state['pending_at'] = now.timestamp()
+        if state['pending'] >= CONFIRM_COUNT:
+            state['phase'] = 'DONE'
+            state['notifications'].append(
+                f"🚙 출차 확인 알림\n차량번호: {os.environ.get('CAR_NUMBER', '')}"
+                f"\n마지막 주차 확인: {state['last_in']}"
+                f"\n출차 확인: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+                '\n주차장: 용산구청 부설주차장\n오늘 조회를 종료합니다.')
+    save(state)
+    flush_notifications(state)
 
-    if pending < CONFIRM_COUNT:
-        return
 
-    # 8. 완전 출차 확정
-    last_in = read_file(LAST_IN_FILE, "기록 없음")
-    send_telegram(
-        f"🚙 <b>출차 알림</b>\n\n"
-        f"차량번호: {CAR_NUMBER}\n"
-        f"마지막 주차 확인: {last_in}\n"
-        f"출차 확인: {now_str}\n"
-        f"주차장: {PARKING_NAME}"
-    )
-
-    write_file(STATE_FILE, "OUT")
-    write_file(PENDING_FILE, "0")
-    
-    # 오후 12시 이후 출차 시 오늘은 완벽히 조회를 중단하도록 기록
-    if hour >= 12:
-        write_file(EXIT_DONE_FILE, now.strftime("%Y-%m-%d"))
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
