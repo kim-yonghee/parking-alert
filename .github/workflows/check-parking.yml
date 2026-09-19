@@ -15,44 +15,62 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests holidays
+
       - name: Run parking check
         env:
           CAR_NUMBER: ${{ secrets.CAR_NUMBER }}
+          API_URL: ${{ secrets.API_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          API_URL: ${{ secrets.API_URL }}
         run: python check_parking.py
+
       - name: Save state
         if: always()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+
           if [ ! -f parking_state.json ]; then
             exit 0
           fi
+
           git add -- parking_state.json
+
           if git diff --staged --quiet; then
+            echo "변경 없음"
             exit 0
           fi
+
           git commit -m "Update parking state"
+
           for i in 1 2 3; do
             if git pull --rebase origin main && git push origin main; then
               exit 0
             fi
+
             if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
               git rebase --abort
+              echo "상태 저장 충돌: 확인 필요"
               exit 1
             fi
+
+            echo "push 재시도 $i"
             sleep 5
           done
+
+          echo "push 최종 실패"
           exit 1
