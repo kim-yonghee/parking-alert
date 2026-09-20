@@ -7,15 +7,46 @@ import holidays
 import requests
 
 
-KST = timezone(timedelta(hours=9))
-STATE = Path("parking_state.json")
+# ===== 기본 설정 =====
 
+KST = timezone(timedelta(hours=9))
+
+# Secrets 값이 없거나 비어 있으면 기존 기본값 사용
+CAR_NUMBER = (
+    os.environ.get("CAR_NUMBER") or ""
+).strip() or "1989"
+
+API_URL = (
+    os.environ.get("API_URL") or ""
+).strip() or "http://yongparking.co.kr/include/DST/inc_find_car.dst"
+
+TELEGRAM_BOT_TOKEN = (
+    os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+).strip()
+
+TELEGRAM_CHAT_ID = (
+    os.environ.get("TELEGRAM_CHAT_ID") or ""
+).strip()
+
+PARKING_NAME = "용산구청 부설주차장"
+
+STATE_FILE = Path("parking_state.json")
+
+# 연속 2회 정상 미조회 시 출차 확정
 CONFIRM_COUNT = 2
+
+# 미조회 확인 사이가 20분을 넘으면 횟수 초기화
 MAX_GAP_SECONDS = 20 * 60
 
-# 기관 자체 휴일 등을 추가할 수 있습니다.
+# 추가 휴일이 있으면 날짜 입력
 # 예: EXTRA_HOLIDAYS = {"2026-12-31"}
 EXTRA_HOLIDAYS = set()
+
+
+# ===== 날짜 및 상태 관리 =====
+
+def get_kst_now():
+    return datetime.now(KST)
 
 
 def is_holiday(now):
@@ -23,6 +54,7 @@ def is_holiday(now):
         years=now.year,
         observed=True,
     )
+
     return (
         now.weekday() >= 5
         or now.date() in calendar
@@ -30,8 +62,9 @@ def is_holiday(now):
     )
 
 
-def save(state):
-    temporary = STATE.with_suffix(".tmp")
+def save_state(state):
+    temporary = STATE_FILE.with_suffix(".tmp")
+
     temporary.write_text(
         json.dumps(
             state,
@@ -40,17 +73,20 @@ def save(state):
         ),
         encoding="utf-8",
     )
-    temporary.replace(STATE)
+
+    temporary.replace(STATE_FILE)
 
 
-def load(today):
-    if STATE.exists():
+def load_state(today):
+    if STATE_FILE.exists():
         state = json.loads(
-            STATE.read_text(encoding="utf-8")
+            STATE_FILE.read_text(encoding="utf-8")
         )
+
         if state["date"] == today:
             return state
 
+    # 날짜가 바뀌면 새 상태로 시작
     return {
         "date": today,
         "phase": "WAIT_IN",
@@ -63,142 +99,176 @@ def load(today):
     }
 
 
-def send_telegram(message):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat = os.environ.get("TELEGRAM_CHAT_ID")
+# ===== 텔레그램 =====
 
-    if not token or not chat:
+def send_telegram(message):
+    missing = []
+
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+
+    if not TELEGRAM_CHAT_ID:
+        missing.append("TELEGRAM_CHAT_ID")
+
+    if missing:
         raise RuntimeError(
-            "텔레그램 Secrets 설정이 필요합니다."
+            "텔레그램 Secrets 누락: "
+            + ", ".join(missing)
         )
+
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
 
     try:
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            url,
             json={
-                "chat_id": chat,
+                "chat_id": TELEGRAM_CHAT_ID,
                 "text": message,
             },
             timeout=10,
         )
-
-        if (
-            not response.ok
-            or response.json().get("ok") is not True
-        ):
-            raise RuntimeError("텔레그램 발송 실패")
-
-    except (requests.RequestException, ValueError):
+    except requests.RequestException:
+        # 예외 원문에 봇 토큰이 노출되지 않도록 처리
         raise RuntimeError(
-            "텔레그램 연결 또는 응답 오류"
+            "텔레그램 연결 실패: 다음 실행에서 재시도합니다."
         ) from None
 
-
-def flush_notifications(state):
-    while state["notifications"]:
-        send_telegram(state["notifications"][0])
-        state["notifications"].pop(0)
-        save(state)
-
-
-def check_parking():
-    car = os.environ.get("CAR_NUMBER")
-    api = os.environ.get("API_URL")
-
-    if not car or not api:
+    if not response.ok:
         raise RuntimeError(
-            "CAR_NUMBER와 API_URL Secrets가 필요합니다."
+            "텔레그램 발송 실패: "
+            f"HTTP {response.status_code}"
         )
 
     try:
+        result = response.json()
+    except ValueError:
+        raise RuntimeError(
+            "텔레그램 응답 해석 실패"
+        ) from None
+
+    if result.get("ok") is not True:
+        raise RuntimeError(
+            "텔레그램 API가 발송 실패를 반환했습니다."
+        )
+
+    print("텔레그램 발송 성공")
+
+
+def flush_notifications(state):
+    # 발송 성공한 알림만 목록에서 제거
+    while state["notifications"]:
+        send_telegram(state["notifications"][0])
+        state["notifications"].pop(0)
+        save_state(state)
+
+
+# ===== 주차 조회 =====
+
+def check_parking():
+    params = {
+        "PROC_CMD": "FIND_00",
+        "CAR_TYPE": "00",
+        "CAR_NO": CAR_NUMBER,
+    }
+
+    try:
         response = requests.get(
-            api,
-            params={
-                "PROC_CMD": "FIND_00",
-                "CAR_TYPE": "00",
-                "CAR_NO": car,
-            },
+            API_URL,
+            params=params,
             timeout=10,
         )
         response.raise_for_status()
 
     except requests.RequestException:
         print(
-            "주차 API 연결 실패: "
+            "주차 API 연결 오류: "
             "이번 조회로 입출차를 판단하지 않습니다."
         )
         return None
 
-    # 실제 API 응답 규격 확인 필요:
-    # OK = 차량 있음 / NO = 정상 차량 미조회로 가정
-    status = (
-        response.text.strip()
-        .split("|", 1)[0]
-        .strip()
-    )
+    result = response.text.strip()
+    status = result.split("|", 1)[0].strip()
 
+    # 실제 API 응답 규격 확인 필요
     if status == "OK":
+        print("차량 주차 확인")
         return True
 
     if status == "NO":
+        print("정상 응답: 차량 미조회")
         return False
 
-    # 오류, 빈 응답, HTML 등을 출차로 오인하지 않음
-    print("알 수 없는 주차 API 응답: 입출차 판단 보류")
+    # FAIL, ERR, HTML, 빈 응답 등은 출차로 판단하지 않음
+    print(
+        "알 수 없는 주차 API 응답: "
+        "입출차 판단을 보류합니다."
+    )
     return None
 
 
-def main(now=None):
-    now = now or datetime.now(KST)
+# ===== 메인 =====
+
+def main():
+    now = get_kst_now()
+    today = now.strftime("%Y-%m-%d")
+    now_text = now.strftime("%Y-%m-%d %H:%M:%S")
+
     holiday = is_holiday(now)
 
-    # 평일 목요일만 제외. 목요일이 휴일이면 조회.
+    # 일반 목요일은 제외, 목요일 공휴일은 조회
     if now.weekday() == 3 and not holiday:
         print("평일 목요일: 조회하지 않습니다.")
         return
 
-    start = 9 * 60 if holiday else 7 * 60
-    entry_end = 18 * 60 if holiday else 9 * 60
-    window = (
-        "09:00~18:00"
-        if holiday
-        else "07:00~09:00"
-    )
+    if holiday:
+        entry_start = 9 * 60
+        entry_end = 18 * 60
+        window_text = "09:00~18:00"
+        day_type = "휴일"
+    else:
+        entry_start = 7 * 60
+        entry_end = 9 * 60
+        window_text = "07:00~09:00"
+        day_type = "평일"
 
-    day_type = "휴일" if holiday else "평일"
     print(
         f"{day_type} 규칙 적용: "
-        f"입차 확인 {window}"
+        f"입차 확인 {window_text}"
     )
 
-    state = load(now.strftime("%Y-%m-%d"))
+    state = load_state(today)
 
-    # 실패한 알림 재시도. 주차 API는 호출하지 않음.
+    # 실패한 알림부터 재시도
+    # 이 과정에서는 주차 API를 호출하지 않음
     flush_notifications(state)
 
     if state["phase"] == "DONE":
-        print("당일 조회 종료")
+        print("당일 조회가 종료되어 추가 조회하지 않습니다.")
         return
 
     minutes = now.hour * 60 + now.minute
 
-    # 입차 확인 단계
-    if state["phase"] == "WAIT_IN":
-        if minutes >= entry_end:
-            state["phase"] = "DONE"
+    # ===== 입차 대기 =====
 
+    if state["phase"] == "WAIT_IN":
+
+        # 입차 확인 시간 종료
+        if minutes >= entry_end:
             checks = state.get("morning_checks", 0)
             errors = state.get("morning_errors", 0)
 
             if checks == 0:
                 detail = (
-                    f"{window} 정상 조회 기록이 없어 "
+                    f"{window_text} 정상 조회 기록이 없어 "
                     "입차 여부를 확인하지 못했습니다."
                 )
             else:
                 detail = (
-                    f"{window} 동안 "
-                    "입차가 확인되지 않았습니다."
+                    f"{window_text} 동안 "
+                    "차량의 입차가 확인되지 않았습니다."
                 )
 
             if errors:
@@ -207,19 +277,23 @@ def main(now=None):
                     "포함되어 있습니다."
                 )
 
+            state["phase"] = "DONE"
+
             state["notifications"].append(
-                "🚫 차량 입차 미확인 알림\n"
-                f"차량번호: {os.environ.get('CAR_NUMBER', '')}\n"
-                f"{detail}\n"
+                "🚫 차량 입차 미확인 알림\n\n"
+                f"차량번호: {CAR_NUMBER}\n"
+                f"주차장: {PARKING_NAME}\n"
+                f"{detail}\n\n"
                 "오늘 조회를 종료합니다."
             )
 
-            save(state)
+            save_state(state)
             flush_notifications(state)
-            print("입차 확인 시간 종료: 당일 조회 종료")
             return
 
-        if minutes < start:
+        # 조회 시작 전
+        if minutes < entry_start:
+            print("입차 조회 시작 전입니다.")
             return
 
         found = check_parking()
@@ -233,72 +307,79 @@ def main(now=None):
 
         if found is True:
             state["phase"] = "IN"
-            state["last_in"] = now.strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            state["last_in"] = now_text
+            state["pending"] = 0
+            state["pending_at"] = None
 
-            next_check = (
-                "18:00까지 출차를 확인합니다."
-                if holiday
-                else "오후 6시 30분부터 출차를 확인합니다."
-            )
+            if holiday:
+                next_step = (
+                    "18:00까지 출차를 확인합니다."
+                )
+            else:
+                next_step = (
+                    "18:30부터 출차를 확인합니다."
+                )
 
             state["notifications"].append(
-                "🚗 입차 확인 알림\n"
-                f"차량번호: {os.environ.get('CAR_NUMBER', '')}\n"
-                f"확인시간: {state['last_in']}\n"
-                "주차장: 용산구청 부설주차장\n"
-                f"{next_check}"
+                "🚗 입차 확인 알림\n\n"
+                f"차량번호: {CAR_NUMBER}\n"
+                f"확인시간: {now_text}\n"
+                f"주차장: {PARKING_NAME}\n\n"
+                f"{next_step}"
             )
 
-            save(state)
-            flush_notifications(state)
-
-        else:
-            save(state)
-
+        save_state(state)
+        flush_notifications(state)
         return
 
-    # 입차 확인 후 출차 확인 단계
+    # ===== 입차 확인 후 출차 대기 =====
+
+    # 휴일은 18시에 조회 종료
     if holiday and minutes >= 18 * 60:
         state["phase"] = "DONE"
         state["pending"] = 0
         state["pending_at"] = None
-        save(state)
+
+        save_state(state)
+
         print(
             "휴일 조회 시간 종료: "
-            "출차를 추정하지 않고 당일 종료"
+            "출차가 확인되지 않았으므로 "
+            "출차 알림 없이 조회만 종료합니다."
         )
         return
 
-    if holiday and minutes < start:
+    # 휴일 조회 시작 전
+    if holiday and minutes < 9 * 60:
+        print("휴일 조회 시작 전입니다.")
         return
 
+    # 평일은 입차 확인 후 18:30까지 조회 중단
     if not holiday and minutes < 18 * 60 + 30:
         print(
-            "오전 입차 확인 완료: "
-            "18:30까지 조회하지 않습니다."
+            "입차 확인 완료: "
+            "18:30까지 추가 조회하지 않습니다."
         )
         return
 
     found = check_parking()
 
     if found is True:
-        state.update(
-            pending=0,
-            pending_at=None,
-            last_in=now.strftime("%Y-%m-%d %H:%M:%S"),
-        )
+        state["last_in"] = now_text
+        state["pending"] = 0
+        state["pending_at"] = None
+
+        print("계속 주차 중: 추가 알림 없음")
 
     elif found is None:
         # 오류가 끼면 연속 미조회 횟수 초기화
-        state.update(
-            pending=0,
-            pending_at=None,
-        )
+        state["pending"] = 0
+        state["pending_at"] = None
+
+        print("조회 오류: 출차 판정 보류")
 
     else:
-        previous = state["pending_at"]
+        previous = state.get("pending_at")
 
         gap = (
             now.timestamp() - previous
@@ -311,26 +392,35 @@ def main(now=None):
             and 0 < gap <= MAX_GAP_SECONDS
         )
 
-        state["pending"] = (
-            state["pending"] + 1
-            if consecutive
-            else 1
-        )
+        if consecutive:
+            state["pending"] = (
+                state.get("pending", 0) + 1
+            )
+        else:
+            state["pending"] = 1
+
         state["pending_at"] = now.timestamp()
+
+        print(
+            "출차 확인 대기: "
+            f"{state['pending']}/{CONFIRM_COUNT}"
+        )
 
         if state["pending"] >= CONFIRM_COUNT:
             state["phase"] = "DONE"
+            state["pending"] = 0
+            state["pending_at"] = None
 
             state["notifications"].append(
-                "🚙 출차 확인 알림\n"
-                f"차량번호: {os.environ.get('CAR_NUMBER', '')}\n"
+                "🚙 출차 확인 알림\n\n"
+                f"차량번호: {CAR_NUMBER}\n"
                 f"마지막 주차 확인: {state['last_in']}\n"
-                f"출차 확인: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                "주차장: 용산구청 부설주차장\n"
+                f"출차 확인: {now_text}\n"
+                f"주차장: {PARKING_NAME}\n\n"
                 "오늘 조회를 종료합니다."
             )
 
-    save(state)
+    save_state(state)
     flush_notifications(state)
 
 
