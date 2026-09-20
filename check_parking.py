@@ -7,11 +7,10 @@ import holidays
 import requests
 
 
-# ===== 기본 설정 =====
+# ===== 설정 =====
 
 KST = timezone(timedelta(hours=9))
 
-# Secrets 값이 없거나 비어 있으면 기존 기본값 사용
 CAR_NUMBER = (
     os.environ.get("CAR_NUMBER") or ""
 ).strip() or "1989"
@@ -29,16 +28,18 @@ TELEGRAM_CHAT_ID = (
 ).strip()
 
 PARKING_NAME = "용산구청 부설주차장"
-
 STATE_FILE = Path("parking_state.json")
 
 # 연속 2회 정상 미조회 시 출차 확정
 CONFIRM_COUNT = 2
 
-# 미조회 확인 사이가 20분을 넘으면 횟수 초기화
+# 확인 간격이 20분을 넘으면 연속 횟수 초기화
 MAX_GAP_SECONDS = 20 * 60
 
-# 추가 휴일이 있으면 날짜 입력
+# 진단 완료 후 False로 변경할 수 있습니다.
+DEBUG_API = True
+
+# 별도 휴일 추가
 # 예: EXTRA_HOLIDAYS = {"2026-12-31"}
 EXTRA_HOLIDAYS = set()
 
@@ -86,7 +87,6 @@ def load_state(today):
         if state["date"] == today:
             return state
 
-    # 날짜가 바뀌면 새 상태로 시작
     return {
         "date": today,
         "phase": "WAIT_IN",
@@ -131,9 +131,9 @@ def send_telegram(message):
             timeout=10,
         )
     except requests.RequestException:
-        # 예외 원문에 봇 토큰이 노출되지 않도록 처리
         raise RuntimeError(
-            "텔레그램 연결 실패: 다음 실행에서 재시도합니다."
+            "텔레그램 연결 실패: "
+            "다음 실행에서 재시도합니다."
         ) from None
 
     if not response.ok:
@@ -149,7 +149,10 @@ def send_telegram(message):
             "텔레그램 응답 해석 실패"
         ) from None
 
-    if result.get("ok") is not True:
+    if (
+        not isinstance(result, dict)
+        or result.get("ok") is not True
+    ):
         raise RuntimeError(
             "텔레그램 API가 발송 실패를 반환했습니다."
         )
@@ -158,11 +161,42 @@ def send_telegram(message):
 
 
 def flush_notifications(state):
-    # 발송 성공한 알림만 목록에서 제거
+    # 발송 성공한 알림만 제거합니다.
     while state["notifications"]:
         send_telegram(state["notifications"][0])
         state["notifications"].pop(0)
         save_state(state)
+
+
+# ===== API 응답 진단 =====
+
+def print_api_diagnostic(response, result):
+    if not DEBUG_API:
+        return
+
+    # 알려진 설정값을 가리고 앞부분만 출력합니다.
+    preview = result
+
+    for value in (
+        CAR_NUMBER,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        API_URL,
+    ):
+        if value:
+            preview = preview.replace(
+                value,
+                "[가림]",
+            )
+
+    print(
+        "[응답 진단] "
+        f"HTTP={response.status_code}"
+    )
+    print(
+        "[응답 진단] "
+        f"내용={preview[:200]!r}"
+    )
 
 
 # ===== 주차 조회 =====
@@ -184,24 +218,27 @@ def check_parking():
 
     except requests.RequestException:
         print(
-            "주차 API 연결 오류: "
-            "이번 조회로 입출차를 판단하지 않습니다."
+            "주차 API 연결 또는 HTTP 오류: "
+            "입출차 판단을 보류합니다."
         )
         return None
 
     result = response.text.strip()
     status = result.split("|", 1)[0].strip()
 
-    # 실제 API 응답 규격 확인 필요
     if status == "OK":
         print("차량 주차 확인")
         return True
 
+    # 실제 API 규격 확인 전까지 NO만 정상 미조회로 처리
     if status == "NO":
         print("정상 응답: 차량 미조회")
         return False
 
-    # FAIL, ERR, HTML, 빈 응답 등은 출차로 판단하지 않음
+    # 인식하지 못한 응답의 실제 형식을 확인
+    print_api_diagnostic(response, result)
+
+    # 오류·빈 응답·HTML 등을 임의로 출차 처리하지 않음
     print(
         "알 수 없는 주차 API 응답: "
         "입출차 판단을 보류합니다."
@@ -218,7 +255,7 @@ def main():
 
     holiday = is_holiday(now)
 
-    # 일반 목요일은 제외, 목요일 공휴일은 조회
+    # 일반 목요일 제외, 목요일 공휴일은 조회
     if now.weekday() == 3 and not holiday:
         print("평일 목요일: 조회하지 않습니다.")
         return
@@ -241,21 +278,22 @@ def main():
 
     state = load_state(today)
 
-    # 실패한 알림부터 재시도
-    # 이 과정에서는 주차 API를 호출하지 않음
+    # 미발송 알림 재시도: 주차 API는 호출하지 않음
     flush_notifications(state)
 
     if state["phase"] == "DONE":
-        print("당일 조회가 종료되어 추가 조회하지 않습니다.")
+        print(
+            "당일 조회가 종료되어 "
+            "추가 조회하지 않습니다."
+        )
         return
 
     minutes = now.hour * 60 + now.minute
 
-    # ===== 입차 대기 =====
+    # ===== 입차 확인 =====
 
     if state["phase"] == "WAIT_IN":
 
-        # 입차 확인 시간 종료
         if minutes >= entry_end:
             checks = state.get("morning_checks", 0)
             errors = state.get("morning_errors", 0)
@@ -291,7 +329,6 @@ def main():
             flush_notifications(state)
             return
 
-        # 조회 시작 전
         if minutes < entry_start:
             print("입차 조회 시작 전입니다.")
             return
@@ -311,14 +348,11 @@ def main():
             state["pending"] = 0
             state["pending_at"] = None
 
-            if holiday:
-                next_step = (
-                    "18:00까지 출차를 확인합니다."
-                )
-            else:
-                next_step = (
-                    "18:30부터 출차를 확인합니다."
-                )
+            next_step = (
+                "18:00까지 출차를 확인합니다."
+                if holiday
+                else "18:30부터 출차를 확인합니다."
+            )
 
             state["notifications"].append(
                 "🚗 입차 확인 알림\n\n"
@@ -332,7 +366,7 @@ def main():
         flush_notifications(state)
         return
 
-    # ===== 입차 확인 후 출차 대기 =====
+    # ===== 출차 확인 =====
 
     # 휴일은 18시에 조회 종료
     if holiday and minutes >= 18 * 60:
@@ -349,7 +383,6 @@ def main():
         )
         return
 
-    # 휴일 조회 시작 전
     if holiday and minutes < 9 * 60:
         print("휴일 조회 시작 전입니다.")
         return
@@ -372,7 +405,6 @@ def main():
         print("계속 주차 중: 추가 알림 없음")
 
     elif found is None:
-        # 오류가 끼면 연속 미조회 횟수 초기화
         state["pending"] = 0
         state["pending_at"] = None
 
@@ -392,13 +424,11 @@ def main():
             and 0 < gap <= MAX_GAP_SECONDS
         )
 
-        if consecutive:
-            state["pending"] = (
-                state.get("pending", 0) + 1
-            )
-        else:
-            state["pending"] = 1
-
+        state["pending"] = (
+            state.get("pending", 0) + 1
+            if consecutive
+            else 1
+        )
         state["pending_at"] = now.timestamp()
 
         print(
