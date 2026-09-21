@@ -1,10 +1,10 @@
 {
   "date": "2026-09-22",
-  "phase": "WAIT_IN",
+  "phase": "IN",
   "pending": 0,
   "pending_at": null,
-  "last_in": "",
+  "last_in": "2026-09-22 08:30:42",
   "notifications": [],
-  "morning_checks": 18,
+  "morning_checks": 19,
   "morning_errors": 0
 }
