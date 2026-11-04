@@ -1,8 +1,8 @@
 {
   "date": "2026-11-04",
-  "phase": "IN",
-  "pending": 1,
-  "pending_at": 1793788242.030932,
+  "phase": "DONE",
+  "pending": 0,
+  "pending_at": null,
   "last_in": "2026-11-04 19:25:37",
   "notifications": [],
   "morning_checks": 7,
